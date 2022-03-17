@@ -1,0 +1,72 @@
+2. Create a  local directory in  Cloudera Clone with name   Sourcelocal and  maintain all Customers, Branch and  CSV files
+
+mkdir sourcelocal;
+----------------------------------
+3. In  Hive  create Sourcedb
+
+hive> create database sourcedb;
+hive> use sourcedb;
+hive> show databases;
+--------------------------------
+4. In Hive Sourcedb, Create Managed tables for  Customers, Item
+
+hive> CREATE TABLE ITEM(ITEM_CODE INT,ITEM_NAME STRING,ITEM_PRICE INT)ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE;
+hive> CREATE TABLE CUSTOMER(CUST_ID INT,CUST_F_NAME STRING,CUST_M_NAME STRING,CUST_L_NAME STRING,CUST_SSN INT,CUST_STREET STRING,CUST_CITY STRING,CUST_STATE STRING,CUST_COUNTRY STRING,CUST_ZIP INT,CUST_PHONE INT,CUST_EMAIL STRING)ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE;
+----------------------------------
+5. Load  respective item 2  CSV files into item 4 tables
+
+hive> load data local inpath '/home/nancy/sourcelocal/CUSTOMER.csv' into table CUSTOMER;
+hive> select * from CUSTOMER;
+hive> load data local inpath '/home/nancy/sourcelocal/ITEM.csv' into table ITEM;
+hive> select * from ITEM;
+-----------------------------------
+6. In Hive, temporary table and for  Cust_Item table  and  load Tran_Cust_item CSV file
+
+hive> CREATE TABLE CUST_ITEM(TRAN_ID INT,TRAN_DATE DATE,CUST_ID INT,ITEM_CODE INT,NO_OF_ITEM INT) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE;
+hive> load data local inpath '/home/nancy/sourcelocal/CUST_ITEM.csv' into table CUST_ITEM;
+hive> select * from CUST_ITEM;
+hive> CREATE TEMPORARY TABLE TEMP_CUST_ITEM like CUST_ITEM;
+hive> load data local inpath '/home/nancy/sourcelocal/CUST_ITEM.csv' into table TEMP_CUST_ITEM;
+hive> select * from temp_CUST_ITEM;
+---------------------------------------------------------------------------------------------------------------------
+7. In Hive create Tran_Cust_item as  External  table  with partitioned by YEAR & MONTH and insert the data from the temporary table in  item 6
+
+hive> CREATE EXTERNAL TABLE TRAN_CUST_ITEM(TRAN_ID INT,TRAN_DATE DATE,CUST_ID INT,CUST_F_NAME STRING,CUST_L_NAME STRING,CUST_CITY STRING,CUST_STATE STRING,ITEM_CODE INT,ITEM_NAME STRING,ITEM_PRICE DOUBLE,NO_OF_ITEM INT) PARTITIONED BY (YEAR INT,MONTH INT) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE; 
+hive> set hive.exec.dynamic.partition.mode=nonstrict;
+hive> SET hive.exec.max.dynamic.partitions=100000;
+hive> SET hive.exec.max.dynamic.partitions.pernode=100000;
+hive> INSERT INTO TRAN_CUST_ITEM PARTITION(YEAR,MONTH) SELECT T.TRAN_ID,T.TRAN_DATE,C.CUST_ID,C.CUST_F_NAME,C.CUST_L_NAME,C.CUST_CITY,C.CUST_STATE,I.ITEM_CODE,I.ITEM_NAME,I.ITEM_PRICE,T.NO_OF_ITEM,YEAR(TRAN_DATE) AS YEAR,MONTH(TRAN_DATE) AS MONTH FROM CUST_ITEM T JOIN CUSTOMER C ON C.CUST_ID=T.CUST_ID JOIN ITEM I ON I.ITEM_CODE=T.ITEM_CODE; 
+hive> select * from TRAN_CUST_ITEM;
+hive> show partitions TRAN_CUST_ITEM;
+--------------------------------------------------------------------------------------------------------------------
+8. In Hive create a Targetdb
+
+hive> create database targetdb;
+---------------------------------------------------------------------------------------------------------------------
+9. Goto Spark and process the data as per functional requirement
+
+Functional Requirements
+
+1. Create the Customer wise Purchase of  Item details  -Year wise- Month wise  (Name) based on Item Value wise (Product Name &
+,Customer Name).  Summarized Statement
+
+hive> CREATE TABLE SUMMARY(CUSTOMER_NAME STRING,PRODUCT_NAME STRING,YEAR INT,MONTH STRING,ITEM_VALUE DOUBLE,MON INT) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS PARQUET LOCATION '/user/hduser/cust_db/outputdir/year_month_part/';
+hive> INSERT INTO SUMMARY SELECT CONCAT_WS(' ',CUST_F_NAME,CUST_L_NAME) AS CUSTOMER_NAME,ITEM_NAME,YEAR,DATE_FORMAT(TRAN_DATE,'MMMMM'),ROUND(SUM(ITEM_PRICE),2),MONTH FROM SOURCEDB.TRAN_CUST_ITEM GROUP BY CUST_F_NAME,CUST_L_NAME,ITEM_NAME,YEAR,TRAN_DATE,MONTH ORDER BY CUSTOMER_NAME,YEAR,MONTH;
+
+In Hive Targetdb
+Create Externa table in parquet format and insert values 
+
+1)CUST_PURC_YEAR_MON_SUMM
+hive> CREATE EXTERNAL TABLE CUST_PURC_YEAR_MON_SUMM(CUSTOMER_NAME STRING,PRODUCT_NAME STRING,YEAR INT,MONTH STRING,ITEM_VALUE DOUBLE) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS PARQUET LOCATION '/user/hduser/cust_db/outputdir/summary/CUST_PURC_YEAR_MON_SUMM/';
+hive> INSERT INTO TARGETDB.CUST_PURC_YEAR_MON_SUMM SELECT CUSTOMER_NAME,PRODUCT_NAME,YEAR,MONTH,ITEM_VALUE FROM TARGETDB.SUMMARY;
+
+2)ITEM_LEAST_MOVED: 
+hive> CREATE EXTERNAL TABLE TARGETDB.ITEM_LEAST_MOVED(CUSTOMER_NAME STRING,PRODUCT_NAME STRING,SOLD_VALUE DOUBLE,YEAR INT) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS PARQUET LOCATION '/user/hduser/cust_db/outputdir/summary/ITEM_LEAST_MOVED/';
+hive> INSERT INTO TARGETDB.ITEM_LEAST_MOVED SELECT CONCAT_WS(' ',CUST_F_NAME),ITEM_NAME,ROUND(SUM(ITEM_PRICE * NO_OF_ITEM),2), YEAR FROM SOURCEDB.TRAN_CUST_ITEM WHERE YEAR BETWEEN 2017 AND 2020 GROUP BY CUST_F_NAME,CUST_L_NAME,ITEM_NAME,'1','2','4',YEAR ORDER BY 3 LIMIT 10;
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+3) Find State & City wise Min,MAX & Avg purchase value wise -  Annually   - File text-format, CSV 
+Note: “Min”,”Max” and “Avg”  column
+
+INSERT OVERWRITE DIRECTORY '/user/hduser/cust_db/outputdir/Loc_Item_Anlz_Summ/' ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' SELECT CUST_STATE AS STATE_WISE,CUST_CITY AS CITY_WISE,YEAR,ROUND(MIN(ITEM_PRICE*NO_OF_ITEM),2) AS MIN_SALE,ROUND(MAX(ITEM_PRICE*NO_OF_ITEM),2) AS MAX_SALE,ROUND(AVG(ITEM_PRICE*NO_OF_ITEM),2) AS AVG_SALE FROM SOURCEDB.TRAN_CUST_ITEM WHERE YEAR BETWEEN 2017 AND 2020 GROUP BY CUST_STATE,CUST_CITY,YEAR ORDER BY STATE_WISE,CITY_WISE,YEAR;
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
